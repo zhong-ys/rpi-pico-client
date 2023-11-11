@@ -3,6 +3,7 @@ import json
 import network
 import machine
 import ubinascii
+import sys
 from machine import Timer
 import config
 
@@ -68,8 +69,128 @@ def connect_wifi():
     print(f'Connected on {ip}')
     return ip
 
+class Context:
+    _client = None
+    topic = ""
+    message = ""
+    def __init__(self, client, topic, message) -> None:
+        self._client = client
+        self.topic = topic
+        self.message = message
+
+    def publish(self, message):
+        # self._client.publish(self.topic, json.dumps(message), retain=True, qos=1)
+        # self._client.check_msg()
+        # self._client.wait_msg()
+        print(f"Dummy publish. topic={self.topic}, message={json.dumps(message)}")
+
+
+# def publish_context(context: Context):
+#     mqtt.publish(context.topic, json.dumps(context.message), retain=True, qos=1)
+
+class Machine:
+    def init(self, context: Context):
+        return self.executing
+    
+    def executing(self, context: Context):
+        return self.successful
+
+    def successful(self, context: Context):
+        context.publish(context.message)
+        return None
+
+    def failed(self, context: Context):
+        return None
+
+    # def done(self, context: Context):
+    #     return None
+
+class Restart(Machine):
+    def init(self, context: Context):
+        return self.executing
+
+    def executing(self, context: Context):
+        return self.successful
+
+class SoftwareUpdate(Machine):
+    def init(self, context: Context):
+        return self.executing
+
+    def executing(self, context: Context):
+        return self.successful
+
+    def successful(self, context: Context):
+        return None
+    
+class SoftwareList(Machine):
+    def successful(self, context: Context):
+        context.message["status"] = "successful"
+        context.message["currentSoftwareList"] = [
+            {"type": "", "modules":[
+                {"name": __APPLICATION_NAME__, "version": __APPLICATION_VERSION__},
+            ]}
+        ]
+        return super().successful(context)
+
+class Unsupported(Machine):
+    def init(self, context: Context):
+        return self.failed
+
+def run(context: Context, state_machine: Machine):
+    try:
+        print(f"Starting state machine: {type(state_machine).__name__}, context={context.message}")
+        state = getattr(state_machine, context.message.get("status", "init"), None)
+        error_count = 0
+        while state is not None:
+            try:
+                print(f"Running state: {state.__name__}")
+                state = state(context)
+                if state is not None:
+                    context.message["status"] = state.__name__
+                    print(f"Save next state: {state.__name__}")
+
+                    # TODO: reduce the stack a bit
+                    mqtt.publish(context.topic, json.dumps(context.message), retain=True, qos=1)
+                    # publish_context(context)
+                    # context._client.publish(
+                    #     context.topic,
+                    #     json.dumps(context.message),
+                    #     retain=True,
+                    #     qos=1,
+                    # )
+                    # context._client.check_msg()
+                    # context.publish(context.message)
+            except Exception as ex:
+                
+                print(f"Exception during state: {ex}")
+                sys.print_exception(ex)
+                if error_count > 0:
+                    print("Aborting cyclic error")
+                    break
+                state = state_machine.failed
+                error_count += 1
+
+        print("Machine is finished")
+    except Exception as ex:
+        print(f"Machine exception. {ex}")
+
+def get_machine(context: Context) -> Machine:
+    command_type = context.topic.decode("utf-8").split("/")[-2]
+
+    status = context.message.get("status")
+    if status in ["successful", "failed"]:
+        # Don't start at an already finished state to avoid recursive loops
+        return None
+
+    if command_type == "software_update":
+        return SoftwareUpdate()
+    if command_type == "software_list":
+        return SoftwareList()
+    if command_type == "restart":
+        return Restart()
+    return Unsupported()
+
 def on_message(topic, msg):
-    print("Received command")
     if not len(msg):
         return
 
@@ -82,8 +203,30 @@ def on_message(topic, msg):
         return
 
     command_type = topic.decode("utf-8").split("/")[-2]
-    message = json.loads(msg.decode("utf-8"))
+    try:
+        message = json.loads(msg.decode("utf-8"))
+    except Exception as ex:
+        print(f"Ignoring invalid json message: {msg.decode('utf-8')}")
+        mqtt.publish(topic, json.dumps({"status":"failed","reason":"invalid message format"}), retain=True, qos=1)
+        return
+    
+    if not isinstance(message, dict):
+        print(f"Ignoring message as it is not a dictionary: {message}")
+        mqtt.publish(topic, json.dumps({"status":"failed","reason":"invalid message format"}), retain=True, qos=1)
+        return
+
     print(f"Received command: type={command_type}, topic={topic}, message={message}")
+
+    context = Context(mqtt, topic, message)
+    state_machine = get_machine(context)
+
+    if state_machine is None:
+        # print("No state machine")
+        return
+
+    run(context, state_machine)
+    
+    return
 
     if command_type == "restart":
         if message["status"] == "init":
@@ -104,9 +247,10 @@ def on_message(topic, msg):
             }
             mqtt.publish(topic, json.dumps(state), retain=True, qos=1)
 
-    elif command_type == "firmware_update":
-        print("Applying firmware update")
     elif command_type == "software_list":
+        
+        Runner().run(context, SoftwareUpdate().init)
+
         if message["status"] == "init":
             state = {
                 "status": "successful",
