@@ -5,7 +5,6 @@ import machine
 import ubinascii
 import secrets
 from machine import Timer
-import _thread
 
 try:
     from umqtt.robust import MQTTClient
@@ -135,17 +134,6 @@ def publish_telemetry(client):
     client.publish(f"{topic_identifier}/m/environment", json.dumps(message), qos=0)
 
 
-def periodic(client):
-    while 1:
-        try:
-            publish_telemetry(client)
-        except:
-            pass
-        sleep(10)
-    #telemetry_timer = Timer()
-    
-    #telemetry_timer.init(period=10000, mode=Timer.PERIODIC, callback=publish_telemetry)
-
 def mqtt_connect():
     print(f"Connecting to thin-edge.io broker: broker={mqtt_broker}:{mqtt_broker_port}, client_id={mqtt_client}")
     
@@ -157,9 +145,6 @@ def mqtt_connect():
 
     mqtt.set_callback(on_message)
     print("Connected to thin-edge.io broker")
-
-
-    #_thread.start_new_thread(periodic, tuple(mqtt))
     
     # Register device
     mqtt.publish(f"{topic_identifier}", json.dumps({
@@ -190,8 +175,8 @@ def mqtt_connect():
     # Give visual queue that the device booted up
     blink_led()
     
+    # TODO: make sure timer is shutdown on unexpected errors
     timer2 = Timer()
-    # timer2.init(period=2000, mode=Timer.PERIODIC, callback=lambda t:print('Ich werden alle 2 Sekunden ausgeführt.'))
     timer2.init(period=10000, mode=Timer.PERIODIC, callback=lambda t:publish_telemetry(mqtt))
 
     while 1:
@@ -200,20 +185,9 @@ def mqtt_connect():
             blink_led(2, 0.5)
             mqtt.wait_msg()   # blocking
             #mqtt.check_msg()   # non-blocking
-            #publish_telemetry(mqtt)
-            #sleep(10)
         except Exception as ex:
             print(f"Unexpected error: {ex}")
-            
-    # Publish telemetry data
-    # while 1:
-    #     message = {
-    #         "temp": read_temperature(),
-    #     }
-    #     print(f"Publishing telemetry data. {message}")
-    #     mqtt.publish(f"{topic_identifier}/m/environment", json.dumps(message), qos=1)
-    #     blink_led(2, 0.5)
-    #     sleep(10)
+
 
 def main():
     print(f"Starting: device_id={device_id}, topic={topic_identifier}")
