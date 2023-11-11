@@ -3,9 +3,10 @@ import json
 import network
 import machine
 import ubinascii
-import secrets
 from machine import Timer
+import config
 
+# install library if not present
 try:
     from umqtt.robust import MQTTClient
 except ImportError:
@@ -15,9 +16,9 @@ except ImportError:
     mip.install("umqtt.robust")
     from umqtt.robust import MQTTClient
 
+# Application info
 __APPLICATION_NAME__ = "micropython-agent"
-__VERSION__ = "0.0.1"
-
+__APPLICATION_VERSION__ = "0.0.1"
 
 # Device info
 serial_no = ubinascii.hexlify(machine.unique_id()).decode()
@@ -31,10 +32,8 @@ led = machine.Pin("LED", machine.Pin.OUT)
 
 
 # MQTT Client (used to connect to thin-edge.io)
-mqtt_client = f"{topic_identifier}#micropy2"
-mqtt_broker = "roger.local"
-mqtt_broker_port = 1883
-mqtt = MQTTClient(mqtt_client, mqtt_broker, mqtt_broker_port, ssl=False)
+mqtt_client = f"{topic_identifier}#{__APPLICATION_NAME__}"
+mqtt = MQTTClient(mqtt_client, config.TEDGE_BROKER_HOST, int(config.TEDGE_BROKER_PORT) or 1883, ssl=False)
 mqtt.DEBUG = True
 
 # Last Will and Testament message in case of unexpected disconnects
@@ -52,22 +51,22 @@ def read_temperature():
     temperature = 27 - (volt - 0.706)/0.001721
     return round(temperature, 1)
 
+def blink_led(times=6, rate=0.1):
+    for i in range(0, times):
+        led.toggle()
+        sleep(rate)
+    led.on()
+
 def connect_wifi():
     wlan = network.WLAN(network.STA_IF)
     wlan.active(True)
-    wlan.connect(secrets.WIFI_SSID, secrets.WIFI_PASSWORD)
+    wlan.connect(config.WIFI_SSID, config.WIFI_PASSWORD)
     while wlan.isconnected() == False:
         print('Waiting for connection..')
         sleep(1)
     ip = wlan.ifconfig()[0]
     print(f'Connected on {ip}')
     return ip
-
-def blink_led(times=6, rate=0.1):
-    for i in range(0, times):
-        led.toggle()
-        sleep(rate)
-    led.on()
 
 def on_message(topic, msg):
     print("Received command")
@@ -77,7 +76,7 @@ def on_message(topic, msg):
     global is_restarting
     global led
     global mqtt
-    
+
     if is_restarting:
         print("Waiting for device to restart")
         return
@@ -85,8 +84,7 @@ def on_message(topic, msg):
     command_type = topic.decode("utf-8").split("/")[-2]
     message = json.loads(msg.decode("utf-8"))
     print(f"Received command: type={command_type}, topic={topic}, message={message}")
-    #return
-    
+
     if command_type == "restart":
         if message["status"] == "init":
             is_restarting = True
@@ -95,17 +93,16 @@ def on_message(topic, msg):
                 "status": "executing",
             }
             mqtt.publish(topic, json.dumps(state), retain=True, qos=1)
-            #sleep(3)
             print("Restarting device")
-            #sleep(1)
-            machine.reset()    # or hard reset via: machine.reset()
+
+            # or machine.soft_reset()
+            machine.reset()
             sleep(10)
         elif message["status"] == "executing":
             state = {
                 "status": "successful",
             }
             mqtt.publish(topic, json.dumps(state), retain=True, qos=1)
-            #sleep(1)
 
     elif command_type == "firmware_update":
         print("Applying firmware update")
@@ -115,7 +112,7 @@ def on_message(topic, msg):
                 "status": "successful",
                 "currentSoftwareList": [
                     {"type": "", "modules":[
-                        {"name": __APPLICATION_NAME__, "version": __VERSION__},
+                        {"name": __APPLICATION_NAME__, "version": __APPLICATION_VERSION__},
                     ]}
                 ]
             }
@@ -135,25 +132,24 @@ def publish_telemetry(client):
 
 
 def mqtt_connect():
-    print(f"Connecting to thin-edge.io broker: broker={mqtt_broker}:{mqtt_broker_port}, client_id={mqtt_client}")
-    
+    print(f"Connecting to thin-edge.io broker: broker={mqtt.server}:{mqtt.port}, client_id={mqtt.client_id}")
     mqtt.connect()
 
-    # Wait for the broker to consider us dead
+    # wait for the broker to consider us dead
     sleep(6)
     mqtt.check_msg()
 
     mqtt.set_callback(on_message)
     print("Connected to thin-edge.io broker")
-    
-    # Register device
+
+    # register device
     mqtt.publish(f"{topic_identifier}", json.dumps({
         "@type": "child-device",
         "name": device_id,
         "type": "micropython",
     }), qos=1, retain=True)
-    
-    # Add hardware info
+
+    # publish hardware info
     mqtt.publish(f"{topic_identifier}/twin/c8y_Hardware", json.dumps({
         "serialNumber": serial_no,
         "model": "Raspberry Pi Pico W",
@@ -165,19 +161,19 @@ def mqtt_connect():
     mqtt.publish(f"{topic_identifier}/cmd/software_update", b"{}", retain=True, qos=1)
     mqtt.publish(f"{topic_identifier}/cmd/software_list", b"{}", retain=True, qos=1)
 
-    # Startup message
-    mqtt.publish(f"{topic_identifier}/e/boot", json.dumps({"text": f"Application started. version={__VERSION__}"}), qos=1)
-    
+    # startup messages
+    mqtt.publish(f"{topic_identifier}/e/boot", json.dumps({"text": f"Application started. version={__APPLICATION_VERSION__}"}), qos=1)
+
     # subscribe to commands
     mqtt.subscribe(f"{topic_identifier}/cmd/+/+")
     print("Subscribed to commands topic")
-    
-    # Give visual queue that the device booted up
+
+    # give visual queue that the device booted up
     blink_led()
-    
+
     # TODO: make sure timer is shutdown on unexpected errors
-    timer2 = Timer()
-    timer2.init(period=10000, mode=Timer.PERIODIC, callback=lambda t:publish_telemetry(mqtt))
+    timer = Timer()
+    timer.init(period=10000, mode=Timer.PERIODIC, callback=lambda t: publish_telemetry(mqtt))
 
     while 1:
         try:
@@ -197,4 +193,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
