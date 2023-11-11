@@ -129,10 +129,10 @@ def publish_telemetry(client):
     message = {
         "temp": read_temperature(),
     }
+    blink_led(2, 0.15)
     print(f"Publishing telemetry data. {message}")
-    client.publish(f"{topic_identifier}/m/environment", json.dumps(message), qos=1)
-    #blink_led(2, 0.5)
-    #sleep(10)
+    # NOTE: DO NOT USE QOS > 0, as this will block the client!
+    client.publish(f"{topic_identifier}/m/environment", json.dumps(message), qos=0)
 
 
 def periodic(client):
@@ -150,6 +150,11 @@ def mqtt_connect():
     print(f"Connecting to thin-edge.io broker: broker={mqtt_broker}:{mqtt_broker_port}, client_id={mqtt_client}")
     
     mqtt.connect()
+
+    # Wait for the broker to consider us dead
+    sleep(6)
+    mqtt.check_msg()
+
     mqtt.set_callback(on_message)
     print("Connected to thin-edge.io broker")
 
@@ -186,7 +191,8 @@ def mqtt_connect():
     blink_led()
     
     timer2 = Timer()
-    timer2.init(period=2000, mode=Timer.PERIODIC, callback=lambda t:print('Ich werden alle 2 Sekunden ausgeführt.'))
+    # timer2.init(period=2000, mode=Timer.PERIODIC, callback=lambda t:print('Ich werden alle 2 Sekunden ausgeführt.'))
+    timer2.init(period=10000, mode=Timer.PERIODIC, callback=lambda t:publish_telemetry(mqtt))
 
     while 1:
         try:
