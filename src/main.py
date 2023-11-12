@@ -327,14 +327,6 @@ async def publisher(queue, client):
         client.publish(topic, payload, retain=retain, qos=qos)
 
 
-async def mqtt_driver(client):
-    while True:
-        try:
-            client.wait_msg()   # blocking
-            await sleep(0.1)
-        except Exception as ex:
-            pass
-
 #
 # Main
 #
@@ -368,7 +360,6 @@ async def main():
         publisher_task = asyncio.create_task(publisher(outgoing_queue, mqtt))
 
         await asyncio.sleep(5)
-        # driver_task = asyncio.create_task(mqtt_driver(mqtt))
 
         # NOTE: use Timer over async tasks due to a blocking issue when publishing MQTT messages
         # This could be solved in the future if necessary
@@ -377,7 +368,6 @@ async def main():
         await agent_task
         await command_task
         await publisher_task
-        # await driver_task
     except KeyboardInterrupt:
         print("Shutting down...")
     finally:
