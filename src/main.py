@@ -3,12 +3,14 @@
 import json
 import network
 import machine
+import os
 import sys
 import time
 import ubinascii
 import asyncio
 from machine import Timer
 from asyncio import sleep
+import requests
 
 import config
 
@@ -128,11 +130,56 @@ class Restart(Machine):
         return self.successful
 
 
+def download_file(url, out_file):
+    # TODO: Create a new TEDGE_C8Y_CLIENT_HOST
+    url = url.replace("127.0.0.1", config.TEDGE_BROKER_HOST)
+    url = url.replace("0.0.0.0", config.TEDGE_BROKER_HOST)
+    print(f"Downloading file. url={url}")
+    response = requests.get(url)
+    response_status_code = response.status_code
+    response_text = response.text
+    response.close()
+    if response_status_code != 200:
+        raise ValueError(f"Failed to download url. url={url}, status_code={response_status_code}")
+
+    with open(out_file, "w") as file:
+        file.write(response_text)
+
+
 class SoftwareUpdate(Machine):
     def init(self, context: Context):
         return self.executing
 
+    # {"status":"init","updateList":[{"type":"default","modules":[{"name":"micropython-agent","version":"0.0.1","url":"http://127.0.0.1:8001/c8y/inventory/binaries/4548385","action":"install"}]}]}
+
     def executing(self, context: Context):
+        print(f"Installing software: {context.message}")
+        for group in context.message.get("updateList", []):
+            package_type = group.get("type") or "default"
+
+            if package_type not in ["default", "micropython"]:
+                context.reason = f"Software type is not supported. type={package_type}"
+                return self.failed
+
+            for module in group["modules"]:
+                if module["url"]:
+                    out_file = "main.py.tmp"
+                    try:
+                        download_file(module["url"], out_file)
+                    except Exception as ex:
+                        context.reason = str(ex)
+                        return self.failed
+
+                    print("Replacing main")
+                    APPLICATION_FILE = "main.py"
+                    os.rename(out_file, APPLICATION_FILE)
+                    # TODO: Change the file out
+                    context.restart_requested = True
+                    return self.restarting
+
+        return self.successful
+
+    def restarting(self, context: Context):
         return self.successful
 
     def successful(self, context: Context):
@@ -171,6 +218,8 @@ async def run(outgoing_queue, context: Context, state_machine: Machine):
                 if state is not None:
                     context.message["status"] = state.__name__
                     print(f"Save next state: {state.__name__}")
+                    if context.reason:
+                        context.message["reason"] = context.reason
 
                     await outgoing_queue.put(
                         (context.topic, json.dumps(context.message), True, 1)
