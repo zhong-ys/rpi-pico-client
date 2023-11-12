@@ -21,6 +21,7 @@ try:
 except ImportError:
     print("Installing missing dependencies")
     import mip
+
     mip.install("umqtt.simple")
     mip.install("umqtt.robust")
     from umqtt.robust import MQTTClient
@@ -30,6 +31,7 @@ try:
 except ImportError:
     print("Installing missing dependencies")
     import mip
+
     mip.install("github:peterhinch/micropython-async/v3/primitives")
     from primitives import Queue
 
@@ -51,9 +53,10 @@ led = machine.Pin("LED", machine.Pin.OUT)
 
 def read_temperature():
     adc_value = sensor.read_u16()
-    volt = (3.3/65535) * adc_value
-    temperature = 27 - (volt - 0.706)/0.001721
+    volt = (3.3 / 65535) * adc_value
+    temperature = 27 - (volt - 0.706) / 0.001721
     return round(temperature, 1)
+
 
 async def blink_led_async(times=6, rate=0.1):
     for i in range(0, times):
@@ -61,22 +64,25 @@ async def blink_led_async(times=6, rate=0.1):
         await sleep(rate)
     led.on()
 
+
 def blink_led(times=6, rate=0.1):
     for i in range(0, times):
         led.toggle()
         time.sleep(rate)
     led.on()
 
+
 async def connect_wifi():
     wlan = network.WLAN(network.STA_IF)
     wlan.active(True)
     wlan.connect(config.WIFI_SSID, config.WIFI_PASSWORD)
     while wlan.isconnected() == False:
-        print('Waiting for connection..')
+        print("Waiting for connection..")
         await sleep(1)
     ip = wlan.ifconfig()[0]
-    print(f'Connected on {ip}')
+    print(f"Connected on {ip}")
     return ip
+
 
 #
 # Commands
@@ -87,10 +93,12 @@ class Context:
     message = ""
     reason = None
     restart_requested = False
+
     def __init__(self, topic, type, message) -> None:
         self.topic = topic
         self.type = type
         self.message = message
+
 
 class Machine:
     def init(self, context: Context):
@@ -130,22 +138,30 @@ class SoftwareUpdate(Machine):
     def successful(self, context: Context):
         return None
 
+
 class SoftwareList(Machine):
     def successful(self, context: Context):
         context.message["currentSoftwareList"] = [
-            {"type": "", "modules":[
-                {"name": __APPLICATION_NAME__, "version": __APPLICATION_VERSION__},
-            ]}
+            {
+                "type": "",
+                "modules": [
+                    {"name": __APPLICATION_NAME__, "version": __APPLICATION_VERSION__},
+                ],
+            }
         ]
         return super().successful(context)
+
 
 class Unsupported(Machine):
     def init(self, context: Context):
         return self.failed
 
+
 async def run(outgoing_queue, context: Context, state_machine: Machine):
     try:
-        print(f"Starting state machine: {type(state_machine).__name__}, context={context.message}")
+        print(
+            f"Starting state machine: {type(state_machine).__name__}, context={context.message}"
+        )
         state = getattr(state_machine, context.message.get("status", "init"), None)
         error_count = 0
         while state is not None:
@@ -156,20 +172,26 @@ async def run(outgoing_queue, context: Context, state_machine: Machine):
                     context.message["status"] = state.__name__
                     print(f"Save next state: {state.__name__}")
 
-                    await outgoing_queue.put((context.topic, json.dumps(context.message), True, 1))
+                    await outgoing_queue.put(
+                        (context.topic, json.dumps(context.message), True, 1)
+                    )
                     print("Queued outgoing message")
                     # await sleep(1)
 
                     if context.restart_requested:
                         print("Restart requested. Stopping state machine execution")
-                        await outgoing_queue.put((
-                            f"{topic_identifier}/e/reboot",
-                            json.dumps({
-                                "text": "Restarting device",
-                            }),
-                            False,
-                            0,
-                        ))
+                        await outgoing_queue.put(
+                            (
+                                f"{topic_identifier}/e/reboot",
+                                json.dumps(
+                                    {
+                                        "text": "Restarting device",
+                                    }
+                                ),
+                                False,
+                                0,
+                            )
+                        )
                         return True
             except Exception as ex:
                 print(f"Exception during state: {ex}")
@@ -186,6 +208,7 @@ async def run(outgoing_queue, context: Context, state_machine: Machine):
     except Exception as ex:
         print(f"Machine exception. {ex}")
 
+
 def get_machine(context: Context) -> Machine:
     if context.type == "software_update":
         return SoftwareUpdate()
@@ -195,17 +218,20 @@ def get_machine(context: Context) -> Machine:
         return Restart()
     return Unsupported()
 
+
 async def command_executor(queue, client, outgoing_queue):
     count = 1
     print("Starting command executor")
     while True:
         topic, command_type, command = await queue.get()  # Blocks until data is ready
-        print(f"[id={count}, type={command_type}] Processing command. {topic} {command}")
+        print(
+            f"[id={count}, type={command_type}] Processing command. {topic} {command}"
+        )
 
         context = Context(topic, command_type, command)
         state_machine = get_machine(context)
         if state_machine:
-            should_restart =await run(outgoing_queue, context, state_machine)
+            should_restart = await run(outgoing_queue, context, state_machine)
             if should_restart:
                 print("Restart requested")
                 await sleep(5)
@@ -214,6 +240,7 @@ async def command_executor(queue, client, outgoing_queue):
 
         print(f"[id={count}, type={command_type}] Finished command")
         count += 1
+
 
 #
 # Telemetry
@@ -225,20 +252,24 @@ def publish_telemetry(outgoing_queue, period=10):
     print(f"Queuing telemetry data. {message}")
     blink_led(2, 0.15)
     try:
-        outgoing_queue.put_nowait((
-            f"{topic_identifier}/m/environment",
-            json.dumps(message),
-            False,
-            0,
-        ))
+        outgoing_queue.put_nowait(
+            (
+                f"{topic_identifier}/m/environment",
+                json.dumps(message),
+                False,
+                0,
+            )
+        )
     except Exception as ex:
         pass
+
 
 #
 # Agent
 #
 async def agent(queue, client, outgoing_queue):
     try:
+
         def _queue_message(topic, message):
             if len(message):
                 try:
@@ -251,7 +282,9 @@ async def agent(queue, client, outgoing_queue):
                     command_status = command.get("status", "")
                     # if command_status in ["successful", "failed"]:
                     if command_status not in ["init", "restarting"]:
-                        raise ValueError(f"command is already in final state. {command_status}")
+                        raise ValueError(
+                            f"command is already in final state. {command_status}"
+                        )
 
                     command_type = topic.decode("utf-8").split("/")[-2]
                     print(f"Add message to queue: {topic} {message}")
@@ -264,13 +297,14 @@ async def agent(queue, client, outgoing_queue):
         connected = False
         while not connected:
             try:
-                print(f"Connecting to thin-edge.io broker: broker={client.server}:{client.port}, client_id={client.client_id}")
+                print(
+                    f"Connecting to thin-edge.io broker: broker={client.server}:{client.port}, client_id={client.client_id}"
+                )
                 client.connect()
                 connected = True
             except Exception as ex:
                 print("Connection failed retrying later")
                 await sleep(5)
-        
 
         # wait for the broker to consider us dead
         await sleep(2)
@@ -278,26 +312,50 @@ async def agent(queue, client, outgoing_queue):
         print("Connected to thin-edge.io broker")
 
         # register device
-        client.publish(f"{topic_identifier}", json.dumps({
-            "@type": "child-device",
-            "name": device_id,
-            "type": "micropython",
-        }), qos=1, retain=True)
+        client.publish(
+            f"{topic_identifier}",
+            json.dumps(
+                {
+                    "@type": "child-device",
+                    "name": device_id,
+                    "type": "micropython",
+                }
+            ),
+            qos=1,
+            retain=True,
+        )
 
         # publish hardware info
-        client.publish(f"{topic_identifier}/twin/c8y_Hardware", json.dumps({
-            "serialNumber": serial_no,
-            "model": "Raspberry Pi Pico W",
-            "revision": "RP2040",
-        }), qos=1, retain=True)
+        client.publish(
+            f"{topic_identifier}/twin/c8y_Hardware",
+            json.dumps(
+                {
+                    "serialNumber": serial_no,
+                    "model": "Raspberry Pi Pico W",
+                    "revision": "RP2040",
+                }
+            ),
+            qos=1,
+            retain=True,
+        )
 
         # register support for commands
         client.publish(f"{topic_identifier}/cmd/restart", b"{}", retain=True, qos=1)
-        client.publish(f"{topic_identifier}/cmd/software_update", b"{}", retain=True, qos=1)
-        client.publish(f"{topic_identifier}/cmd/software_list", b"{}", retain=True, qos=1)
+        client.publish(
+            f"{topic_identifier}/cmd/software_update", b"{}", retain=True, qos=1
+        )
+        client.publish(
+            f"{topic_identifier}/cmd/software_list", b"{}", retain=True, qos=1
+        )
 
         # startup messages
-        client.publish(f"{topic_identifier}/e/boot", json.dumps({"text": f"Application started. version={__APPLICATION_VERSION__}"}), qos=1)
+        client.publish(
+            f"{topic_identifier}/e/boot",
+            json.dumps(
+                {"text": f"Application started. version={__APPLICATION_VERSION__}"}
+            ),
+            qos=1,
+        )
 
         # subscribe to commands
         client.subscribe(f"{topic_identifier}/cmd/+/+")
@@ -310,7 +368,7 @@ async def agent(queue, client, outgoing_queue):
             try:
                 print("Waiting for msg")
                 # client.wait_msg()   # blocking
-                client.check_msg()   # non-blocking
+                client.check_msg()  # non-blocking
                 await asyncio.sleep(1)
             except Exception as ex:
                 print(f"Unexpected error: {ex}")
@@ -323,7 +381,9 @@ async def publisher(queue, client):
     print("Starting publisher")
     while True:
         topic, payload, retain, qos = await queue.get()  # Blocks until data is ready
-        print(f"Publishing message: topic={topic}, payload={payload}, retain={retain}, qos={qos}")
+        print(
+            f"Publishing message: topic={topic}, payload={payload}, retain={retain}, qos={qos}"
+        )
         client.publish(topic, payload, retain=retain, qos=qos)
 
 
@@ -356,14 +416,20 @@ async def main():
         mqtt.lw_retain = False
 
         agent_task = asyncio.create_task(agent(queue, mqtt, outgoing_queue))
-        command_task = asyncio.create_task(command_executor(queue, mqtt, outgoing_queue))
+        command_task = asyncio.create_task(
+            command_executor(queue, mqtt, outgoing_queue)
+        )
         publisher_task = asyncio.create_task(publisher(outgoing_queue, mqtt))
 
         await asyncio.sleep(5)
 
         # NOTE: use Timer over async tasks due to a blocking issue when publishing MQTT messages
         # This could be solved in the future if necessary
-        timer.init(period=10000, mode=Timer.PERIODIC, callback=lambda t: publish_telemetry(outgoing_queue))
+        timer.init(
+            period=10000,
+            mode=Timer.PERIODIC,
+            callback=lambda t: publish_telemetry(outgoing_queue),
+        )
 
         await agent_task
         await command_task
@@ -374,6 +440,7 @@ async def main():
         if timer:
             timer.deinit()
         print("Exiting...")
+
 
 if __name__ == "__main__":
     asyncio.run(main())
