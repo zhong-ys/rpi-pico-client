@@ -187,7 +187,7 @@ class SoftwareUpdate(Machine):
 
 
 class SoftwareList(Machine):
-    def successful(self, context: Context):
+    def executing(self, context: Context):
         context.message["currentSoftwareList"] = [
             {
                 "type": "",
@@ -196,7 +196,7 @@ class SoftwareList(Machine):
                 ],
             }
         ]
-        return super().successful(context)
+        return self.successful
 
 
 class Unsupported(Machine):
