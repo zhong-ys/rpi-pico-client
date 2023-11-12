@@ -73,16 +73,11 @@ class Context:
     _client = None
     topic = ""
     message = ""
+    restart_requested = False
     def __init__(self, client, topic, message) -> None:
         self._client = client
         self.topic = topic
         self.message = message
-
-    def publish(self, message):
-        # self._client.publish(self.topic, json.dumps(message), retain=True, qos=1)
-        # self._client.check_msg()
-        # self._client.wait_msg()
-        print(f"Dummy publish. topic={self.topic}, message={json.dumps(message)}")
 
 
 # def publish_context(context: Context):
@@ -96,7 +91,6 @@ class Machine:
         return self.successful
 
     def successful(self, context: Context):
-        context.publish(context.message)
         return None
 
     def failed(self, context: Context):
@@ -106,11 +100,22 @@ class Machine:
     #     return None
 
 class Restart(Machine):
+    is_resuming = True
     def init(self, context: Context):
+        self.is_resuming = False
         return self.executing
 
     def executing(self, context: Context):
+        if self.is_resuming:
+            return self.successful
+
+        context.restart_requested = True
+        # machine.reset()
+        # The sleep should never return
+        # sleep(10)
+        # TODO: Add failure reason
         return self.successful
+
 
 class SoftwareUpdate(Machine):
     def init(self, context: Context):
@@ -124,7 +129,6 @@ class SoftwareUpdate(Machine):
     
 class SoftwareList(Machine):
     def successful(self, context: Context):
-        context.message["status"] = "successful"
         context.message["currentSoftwareList"] = [
             {"type": "", "modules":[
                 {"name": __APPLICATION_NAME__, "version": __APPLICATION_VERSION__},
@@ -136,7 +140,7 @@ class Unsupported(Machine):
     def init(self, context: Context):
         return self.failed
 
-def run(context: Context, state_machine: Machine):
+def run(client, context: Context, state_machine: Machine):
     try:
         print(f"Starting state machine: {type(state_machine).__name__}, context={context.message}")
         state = getattr(state_machine, context.message.get("status", "init"), None)
@@ -149,17 +153,19 @@ def run(context: Context, state_machine: Machine):
                     context.message["status"] = state.__name__
                     print(f"Save next state: {state.__name__}")
 
-                    # TODO: reduce the stack a bit
-                    mqtt.publish(context.topic, json.dumps(context.message), retain=True, qos=1)
-                    # publish_context(context)
-                    # context._client.publish(
-                    #     context.topic,
-                    #     json.dumps(context.message),
-                    #     retain=True,
-                    #     qos=1,
-                    # )
-                    # context._client.check_msg()
-                    # context.publish(context.message)
+                    # NOTE: reduce the stack a bit to avoid exceeding it
+                    # qos=1 causes problems with the stack limit as well (probably because it is blocking from the callback?)
+                    client.publish(context.topic, json.dumps(context.message), retain=True, qos=0)
+
+                    if context.restart_requested:
+                        # TODO: does this message work to see if the message has been saved or not?
+                        for _ in range(0, 5):
+                            client.wait_msg()
+                            sleep(0.5)
+                        print("Restarting")
+                        machine.reset()
+                        # Should never happen?
+                        sleep(60)
             except Exception as ex:
                 
                 print(f"Exception during state: {ex}")
@@ -207,12 +213,12 @@ def on_message(topic, msg):
         message = json.loads(msg.decode("utf-8"))
     except Exception as ex:
         print(f"Ignoring invalid json message: {msg.decode('utf-8')}")
-        mqtt.publish(topic, json.dumps({"status":"failed","reason":"invalid message format"}), retain=True, qos=1)
+        mqtt.publish(topic, json.dumps({"status":"failed","reason":"invalid message format"}), retain=True, qos=0)
         return
     
     if not isinstance(message, dict):
         print(f"Ignoring message as it is not a dictionary: {message}")
-        mqtt.publish(topic, json.dumps({"status":"failed","reason":"invalid message format"}), retain=True, qos=1)
+        mqtt.publish(topic, json.dumps({"status":"failed","reason":"invalid message format"}), retain=True, qos=0)
         return
 
     print(f"Received command: type={command_type}, topic={topic}, message={message}")
@@ -221,48 +227,11 @@ def on_message(topic, msg):
     state_machine = get_machine(context)
 
     if state_machine is None:
-        # print("No state machine")
         return
 
-    run(context, state_machine)
-    
+    run(mqtt, context, state_machine)    
     return
 
-    if command_type == "restart":
-        if message["status"] == "init":
-            is_restarting = True
-            led.off()
-            state = {
-                "status": "executing",
-            }
-            mqtt.publish(topic, json.dumps(state), retain=True, qos=1)
-            print("Restarting device")
-
-            # or machine.soft_reset()
-            machine.reset()
-            sleep(10)
-        elif message["status"] == "executing":
-            state = {
-                "status": "successful",
-            }
-            mqtt.publish(topic, json.dumps(state), retain=True, qos=1)
-
-    elif command_type == "software_list":
-        
-        Runner().run(context, SoftwareUpdate().init)
-
-        if message["status"] == "init":
-            state = {
-                "status": "successful",
-                "currentSoftwareList": [
-                    {"type": "", "modules":[
-                        {"name": __APPLICATION_NAME__, "version": __APPLICATION_VERSION__},
-                    ]}
-                ]
-            }
-            mqtt.publish(topic, json.dumps(state), retain=True, qos=1)
-    else:
-        print("Unsupported command")
 
 def publish_telemetry(client):
     # global mqtt
