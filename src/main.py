@@ -429,11 +429,14 @@ async def agent(queue, client, outgoing_queue):
 async def publisher(queue, client):
     print("Starting publisher")
     while True:
-        topic, payload, retain, qos = await queue.get()  # Blocks until data is ready
-        print(
-            f"Publishing message: topic={topic}, payload={payload}, retain={retain}, qos={qos}"
-        )
-        client.publish(topic, payload, retain=retain, qos=qos)
+        try:
+            topic, payload, retain, qos = await queue.get()  # Blocks until data is ready
+            print(
+                f"Publishing message: topic={topic}, payload={payload}, retain={retain}, qos={qos}"
+            )
+            client.publish(topic, payload, retain=retain, qos=qos)
+        except Exception as ex:
+            print(f"Failed to publish message. ex={ex}")
 
 
 #
