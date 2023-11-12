@@ -286,7 +286,6 @@ async def agent(queue, client, outgoing_queue):
             "name": device_id,
             "type": "micropython",
         }), qos=1, retain=True)
-        # client.wait_msg()
 
         # publish hardware info
         client.publish(f"{topic_identifier}/twin/c8y_Hardware", json.dumps({
@@ -329,7 +328,7 @@ async def publisher(queue, client):
         topic, payload, retain, qos = await queue.get()  # Blocks until data is ready
         print(f"Publishing message: topic={topic}, payload={payload}, retain={retain}, qos={qos}")
         client.publish(topic, payload, retain=retain, qos=qos)
-        # client.wait_msg()
+
 
 async def mqtt_driver(client):
     while True:
