@@ -109,21 +109,14 @@ class Machine:
 
 
 class Restart(Machine):
-    is_resuming = True
     def init(self, context: Context):
-        self.is_resuming = False
         return self.executing
 
     def executing(self, context: Context):
-        if self.is_resuming:
-            return self.successful
+        context.restart_requested = True
+        return self.restarting
 
-        # TODO: skip actual restart for testing
-        context.restart_requested = False
-        # machine.reset()
-        # The sleep should never return
-        # sleep(10)
-        # TODO: Add failure reason
+    def restarting(self, context: Context):
         return self.successful
 
 
@@ -169,15 +162,15 @@ async def run(outgoing_queue, context: Context, state_machine: Machine):
 
                     if context.restart_requested:
                         print("Restart requested. Stopping state machine execution")
+                        await outgoing_queue.put((
+                            f"{topic_identifier}/e/reboot",
+                            json.dumps({
+                                "text": "Restarting device",
+                            }),
+                            False,
+                            0,
+                        ))
                         return True
-                        # TODO: does this message work to see if the message has been saved or not?
-                        for _ in range(0, 5):
-                            # client.wait_msg()
-                            await sleep(0.5)
-                        print("Restarting")
-                        machine.reset()
-                        # Should never happen?
-                        await sleep(60)
             except Exception as ex:
                 print(f"Exception during state: {ex}")
                 sys.print_exception(ex)
@@ -212,8 +205,12 @@ async def command_executor(queue, client, outgoing_queue):
         context = Context(topic, command_type, command)
         state_machine = get_machine(context)
         if state_machine:
-            await run(outgoing_queue, context, state_machine)
-            # await run(client, context, state_machine)
+            should_restart =await run(outgoing_queue, context, state_machine)
+            if should_restart:
+                print("Restart requested")
+                await sleep(5)
+                print("RESTARTING DEVICE NOW")
+                machine.reset()
 
         print(f"[id={count}, type={command_type}] Finished command")
         count += 1
@@ -253,7 +250,7 @@ async def agent(queue, client, outgoing_queue):
                     # or if it is resuming after a restart.
                     command_status = command.get("status", "")
                     # if command_status in ["successful", "failed"]:
-                    if command_status not in ["init"]:
+                    if command_status not in ["init", "restarting"]:
                         raise ValueError(f"command is already in final state. {command_status}")
 
                     command_type = topic.decode("utf-8").split("/")[-2]
