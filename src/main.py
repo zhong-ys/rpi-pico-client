@@ -1,10 +1,16 @@
-from time import sleep
+# from time import sleep
+
 import json
 import network
 import machine
 import ubinascii
 import sys
 from machine import Timer
+
+import asyncio
+from primitives import Queue
+from asyncio import sleep
+
 import config
 
 # install library if not present
@@ -16,6 +22,7 @@ except ImportError:
     mip.install("umqtt.simple")
     mip.install("umqtt.robust")
     from umqtt.robust import MQTTClient
+    mip.install("github:peterhinch/micropython-async/v3/primitives")
 
 # Application info
 __APPLICATION_NAME__ = "micropython-agent"
@@ -70,18 +77,15 @@ def connect_wifi():
     return ip
 
 class Context:
-    _client = None
     topic = ""
+    type = ""
     message = ""
+    reason = None
     restart_requested = False
-    def __init__(self, client, topic, message) -> None:
-        self._client = client
+    def __init__(self, topic, type, message) -> None:
         self.topic = topic
+        self.type = type
         self.message = message
-
-
-# def publish_context(context: Context):
-#     mqtt.publish(context.topic, json.dumps(context.message), retain=True, qos=1)
 
 class Machine:
     def init(self, context: Context):
@@ -94,6 +98,8 @@ class Machine:
         return None
 
     def failed(self, context: Context):
+        if not context.reason:
+            context.reason = "Unknown failure"
         return None
 
     # def done(self, context: Context):
@@ -109,7 +115,8 @@ class Restart(Machine):
         if self.is_resuming:
             return self.successful
 
-        context.restart_requested = True
+        # TODO: skip actual restart for testing
+        context.restart_requested = False
         # machine.reset()
         # The sleep should never return
         # sleep(10)
@@ -140,7 +147,7 @@ class Unsupported(Machine):
     def init(self, context: Context):
         return self.failed
 
-def run(client, context: Context, state_machine: Machine):
+async def run(client, context: Context, state_machine: Machine):
     try:
         print(f"Starting state machine: {type(state_machine).__name__}, context={context.message}")
         state = getattr(state_machine, context.message.get("status", "init"), None)
@@ -153,19 +160,18 @@ def run(client, context: Context, state_machine: Machine):
                     context.message["status"] = state.__name__
                     print(f"Save next state: {state.__name__}")
 
-                    # NOTE: reduce the stack a bit to avoid exceeding it
-                    # qos=1 causes problems with the stack limit as well (probably because it is blocking from the callback?)
-                    client.publish(context.topic, json.dumps(context.message), retain=True, qos=0)
+                    client.publish(context.topic, json.dumps(context.message), retain=True, qos=1)
+                    await sleep(1)
 
                     if context.restart_requested:
                         # TODO: does this message work to see if the message has been saved or not?
                         for _ in range(0, 5):
                             client.wait_msg()
-                            sleep(0.5)
+                            await sleep(0.5)
                         print("Restarting")
                         machine.reset()
                         # Should never happen?
-                        sleep(60)
+                        await sleep(60)
             except Exception as ex:
                 
                 print(f"Exception during state: {ex}")
@@ -174,6 +180,8 @@ def run(client, context: Context, state_machine: Machine):
                     print("Aborting cyclic error")
                     break
                 state = state_machine.failed
+                if not context.reason:
+                    context.reason = "Unknown failure"
                 error_count += 1
 
         print("Machine is finished")
@@ -181,78 +189,67 @@ def run(client, context: Context, state_machine: Machine):
         print(f"Machine exception. {ex}")
 
 def get_machine(context: Context) -> Machine:
-    command_type = context.topic.decode("utf-8").split("/")[-2]
-
-    status = context.message.get("status")
-    if status in ["successful", "failed"]:
-        # Don't start at an already finished state to avoid recursive loops
-        return None
-
-    if command_type == "software_update":
+    if context.type == "software_update":
         return SoftwareUpdate()
-    if command_type == "software_list":
+    if context.type == "software_list":
         return SoftwareList()
-    if command_type == "restart":
+    if context.type == "restart":
         return Restart()
     return Unsupported()
 
-def on_message(topic, msg):
-    if not len(msg):
-        return
-
-    global is_restarting
-    global led
-    global mqtt
-
-    if is_restarting:
-        print("Waiting for device to restart")
-        return
-
-    command_type = topic.decode("utf-8").split("/")[-2]
-    try:
-        message = json.loads(msg.decode("utf-8"))
-    except Exception as ex:
-        print(f"Ignoring invalid json message: {msg.decode('utf-8')}")
-        mqtt.publish(topic, json.dumps({"status":"failed","reason":"invalid message format"}), retain=True, qos=0)
-        return
-    
-    if not isinstance(message, dict):
-        print(f"Ignoring message as it is not a dictionary: {message}")
-        mqtt.publish(topic, json.dumps({"status":"failed","reason":"invalid message format"}), retain=True, qos=0)
-        return
-
-    print(f"Received command: type={command_type}, topic={topic}, message={message}")
-
-    context = Context(mqtt, topic, message)
-    state_machine = get_machine(context)
-
-    if state_machine is None:
-        return
-
-    run(mqtt, context, state_machine)    
-    return
-
 
 def publish_telemetry(client):
-    # global mqtt
     message = {
         "temp": read_temperature(),
     }
     blink_led(2, 0.15)
     print(f"Publishing telemetry data. {message}")
-    # NOTE: DO NOT USE QOS > 0, as this will block the client!
-    client.publish(f"{topic_identifier}/m/environment", json.dumps(message), qos=0)
+    client.publish(f"{topic_identifier}/m/environment", json.dumps(message), qos=1)
 
+async def command_executor(queue, client):
+    count = 1
+    print("Starting command executor")
+    while True:
+        topic, command_type, command = await queue.get()  # Blocks until data is ready
+        print(f"[id={count}, type={command_type}] Processing command. {topic} {command}")
 
-def mqtt_connect():
+        context = Context(topic, command_type, command)
+        state_machine = get_machine(context)
+        if state_machine:
+            await run(client, context, state_machine)
+
+        print(f"[id={count}, type={command_type}] Finished command")
+        count += 1
+
+async def agent(queue):
     print(f"Connecting to thin-edge.io broker: broker={mqtt.server}:{mqtt.port}, client_id={mqtt.client_id}")
     mqtt.connect()
 
     # wait for the broker to consider us dead
-    sleep(6)
+    await sleep(2)
     mqtt.check_msg()
 
-    mqtt.set_callback(on_message)
+    def _queue_message(topic, message):
+        if len(message):
+            try:
+                command = json.loads(message.decode("utf-8"))
+                if not isinstance(command, dict):
+                    raise ValueError("payload is not a dictionary")
+                command_type = topic.decode("utf-8").split("/")[-2]
+                print(f"Add message to queue: {topic} {message}")
+
+                # TODO: Keep track of which operations are already known to be in progress
+                # or if it is resuming after a restart.
+                command_status = command.get("status", "")
+                # if command_status in ["successful", "failed"]:
+                if command_status not in ["init"]:
+                    raise ValueError(f"command is already in final state. {command_status}")
+
+                queue.put_nowait((topic, command_type, command))
+            except Exception as ex:
+                print(f"Ignoring message. topic={topic}, message={message}, error={ex}")
+
+    mqtt.set_callback(_queue_message)
     print("Connected to thin-edge.io broker")
 
     # register device
@@ -292,17 +289,26 @@ def mqtt_connect():
         try:
             print("looping")
             blink_led(2, 0.5)
+            await asyncio.sleep(2)
             mqtt.wait_msg()   # blocking
             #mqtt.check_msg()   # non-blocking
         except Exception as ex:
             print(f"Unexpected error: {ex}")
 
 
-def main():
+async def main():
+    queue = Queue(10)
     print(f"Starting: device_id={device_id}, topic={topic_identifier}")
     connect_wifi()
     led.on()
-    mqtt_connect()
+
+    agent_task = asyncio.create_task(agent(queue))
+    command_task = asyncio.create_task(command_executor(queue, mqtt))
+
+    await asyncio.sleep(0)
+    await agent_task
+    await command_task
+    print("Exiting...")
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
