@@ -3,11 +3,11 @@
 import json
 import network
 import machine
-import ubinascii
 import sys
-from machine import Timer
-
+import time
+import ubinascii
 import asyncio
+from machine import Timer
 from primitives import Queue
 from asyncio import sleep
 
@@ -39,43 +39,38 @@ sensor = machine.ADC(adcpin)
 led = machine.Pin("LED", machine.Pin.OUT)
 
 
-# MQTT Client (used to connect to thin-edge.io)
-mqtt_client = f"{topic_identifier}#{__APPLICATION_NAME__}"
-mqtt = MQTTClient(mqtt_client, config.TEDGE_BROKER_HOST, int(config.TEDGE_BROKER_PORT) or 1883, ssl=False)
-mqtt.DEBUG = True
-
-# Last Will and Testament message in case of unexpected disconnects
-mqtt.lw_topic = f"{topic_identifier}/e/disconnected"
-mqtt.lw_msg = json.dumps({"text": "Disconnected"})
-mqtt.lw_qos = 1
-mqtt.lw_retain = False
-
-is_restarting = False
-
-
 def read_temperature():
     adc_value = sensor.read_u16()
     volt = (3.3/65535) * adc_value
     temperature = 27 - (volt - 0.706)/0.001721
     return round(temperature, 1)
 
+async def blink_led_async(times=6, rate=0.1):
+    for i in range(0, times):
+        led.toggle()
+        await sleep(rate)
+    led.on()
+
 def blink_led(times=6, rate=0.1):
     for i in range(0, times):
         led.toggle()
-        sleep(rate)
+        time.sleep(rate)
     led.on()
 
-def connect_wifi():
+async def connect_wifi():
     wlan = network.WLAN(network.STA_IF)
     wlan.active(True)
     wlan.connect(config.WIFI_SSID, config.WIFI_PASSWORD)
     while wlan.isconnected() == False:
         print('Waiting for connection..')
-        sleep(1)
+        await sleep(1)
     ip = wlan.ifconfig()[0]
     print(f'Connected on {ip}')
     return ip
 
+#
+# Commands
+#
 class Context:
     topic = ""
     type = ""
@@ -90,7 +85,7 @@ class Context:
 class Machine:
     def init(self, context: Context):
         return self.executing
-    
+
     def executing(self, context: Context):
         return self.successful
 
@@ -133,7 +128,7 @@ class SoftwareUpdate(Machine):
 
     def successful(self, context: Context):
         return None
-    
+
 class SoftwareList(Machine):
     def successful(self, context: Context):
         context.message["currentSoftwareList"] = [
@@ -173,7 +168,6 @@ async def run(client, context: Context, state_machine: Machine):
                         # Should never happen?
                         await sleep(60)
             except Exception as ex:
-                
                 print(f"Exception during state: {ex}")
                 sys.print_exception(ex)
                 if error_count > 0:
@@ -197,15 +191,6 @@ def get_machine(context: Context) -> Machine:
         return Restart()
     return Unsupported()
 
-
-def publish_telemetry(client):
-    message = {
-        "temp": read_temperature(),
-    }
-    blink_led(2, 0.15)
-    print(f"Publishing telemetry data. {message}")
-    client.publish(f"{topic_identifier}/m/environment", json.dumps(message), qos=1)
-
 async def command_executor(queue, client):
     count = 1
     print("Starting command executor")
@@ -221,13 +206,31 @@ async def command_executor(queue, client):
         print(f"[id={count}, type={command_type}] Finished command")
         count += 1
 
-async def agent(queue):
-    print(f"Connecting to thin-edge.io broker: broker={mqtt.server}:{mqtt.port}, client_id={mqtt.client_id}")
-    mqtt.connect()
+#
+# Telemetry
+#
+def publish_telemetry(client, period=10):
+    message = {
+        "temp": read_temperature(),
+    }
+    print(f"Publishing telemetry data. {message}")
+    blink_led(2, 0.15)
+    try:
+        client.publish(f"{topic_identifier}/m/environment", json.dumps(message), qos=0)
+        client.check_msg()
+    except Exception as ex:
+        pass
+
+#
+# Agent
+#
+async def agent(queue, client):
+    print(f"Connecting to thin-edge.io broker: broker={client.server}:{client.port}, client_id={client.client_id}")
+    client.connect()
 
     # wait for the broker to consider us dead
     await sleep(2)
-    mqtt.check_msg()
+    client.check_msg()
 
     def _queue_message(topic, message):
         if len(message):
@@ -249,66 +252,89 @@ async def agent(queue):
             except Exception as ex:
                 print(f"Ignoring message. topic={topic}, message={message}, error={ex}")
 
-    mqtt.set_callback(_queue_message)
+    client.set_callback(_queue_message)
     print("Connected to thin-edge.io broker")
 
     # register device
-    mqtt.publish(f"{topic_identifier}", json.dumps({
+    client.publish(f"{topic_identifier}", json.dumps({
         "@type": "child-device",
         "name": device_id,
         "type": "micropython",
     }), qos=1, retain=True)
 
     # publish hardware info
-    mqtt.publish(f"{topic_identifier}/twin/c8y_Hardware", json.dumps({
+    client.publish(f"{topic_identifier}/twin/c8y_Hardware", json.dumps({
         "serialNumber": serial_no,
         "model": "Raspberry Pi Pico W",
         "revision": "RP2040",
     }), qos=1, retain=True)
 
     # register support for commands
-    mqtt.publish(f"{topic_identifier}/cmd/restart", b"{}", retain=True, qos=1)
-    mqtt.publish(f"{topic_identifier}/cmd/software_update", b"{}", retain=True, qos=1)
-    mqtt.publish(f"{topic_identifier}/cmd/software_list", b"{}", retain=True, qos=1)
+    client.publish(f"{topic_identifier}/cmd/restart", b"{}", retain=True, qos=1)
+    client.publish(f"{topic_identifier}/cmd/software_update", b"{}", retain=True, qos=1)
+    client.publish(f"{topic_identifier}/cmd/software_list", b"{}", retain=True, qos=1)
 
     # startup messages
-    mqtt.publish(f"{topic_identifier}/e/boot", json.dumps({"text": f"Application started. version={__APPLICATION_VERSION__}"}), qos=1)
+    client.publish(f"{topic_identifier}/e/boot", json.dumps({"text": f"Application started. version={__APPLICATION_VERSION__}"}), qos=1)
 
     # subscribe to commands
-    mqtt.subscribe(f"{topic_identifier}/cmd/+/+")
+    client.subscribe(f"{topic_identifier}/cmd/+/+")
     print("Subscribed to commands topic")
 
     # give visual queue that the device booted up
-    blink_led()
+    await blink_led_async()
 
-    # TODO: make sure timer is shutdown on unexpected errors
-    timer = Timer()
-    timer.init(period=10000, mode=Timer.PERIODIC, callback=lambda t: publish_telemetry(mqtt))
-
-    while 1:
+    while True:
         try:
-            print("looping")
-            blink_led(2, 0.5)
             await asyncio.sleep(2)
-            mqtt.wait_msg()   # blocking
-            #mqtt.check_msg()   # non-blocking
+            client.wait_msg()   # blocking
         except Exception as ex:
             print(f"Unexpected error: {ex}")
 
-
+#
+# Main
+#
 async def main():
-    queue = Queue(10)
-    print(f"Starting: device_id={device_id}, topic={topic_identifier}")
-    connect_wifi()
-    led.on()
+    try:
+        queue = Queue(10)
+        print(f"Starting: device_id={device_id}, topic={topic_identifier}")
+        await connect_wifi()
+        led.on()
 
-    agent_task = asyncio.create_task(agent(queue))
-    command_task = asyncio.create_task(command_executor(queue, mqtt))
+        # MQTT Client (used to connect to thin-edge.io)
+        client_id = f"{topic_identifier}#{__APPLICATION_NAME__}"
+        mqtt = MQTTClient(
+            client_id,
+            config.TEDGE_BROKER_HOST,
+            int(config.TEDGE_BROKER_PORT) or 1883,
+            ssl=False,
+        )
+        mqtt.DEBUG = True
 
-    await asyncio.sleep(0)
-    await agent_task
-    await command_task
-    print("Exiting...")
+        # Last Will and Testament message in case of unexpected disconnects
+        mqtt.lw_topic = f"{topic_identifier}/e/disconnected"
+        mqtt.lw_msg = json.dumps({"text": "Disconnected"})
+        mqtt.lw_qos = 1
+        mqtt.lw_retain = False
+
+        agent_task = asyncio.create_task(agent(queue, mqtt))
+        command_task = asyncio.create_task(command_executor(queue, mqtt))
+
+        await asyncio.sleep(0)
+
+        # NOTE: use Timer over async tasks due to a blocking issue when publishing MQTT messages
+        # This could be solved in the future if necessary
+        timer = Timer()
+        timer.init(period=10000, mode=Timer.PERIODIC, callback=lambda t: publish_telemetry(mqtt))
+
+        await agent_task
+        await command_task
+    except KeyboardInterrupt:
+        print("Shutting down...")
+    finally:
+        if timer:
+            timer.deinit()
+        print("Exiting...")
 
 if __name__ == "__main__":
     asyncio.run(main())
