@@ -8,12 +8,13 @@ import time
 import ubinascii
 import asyncio
 from machine import Timer
-from primitives import Queue
 from asyncio import sleep
 
 import config
 
-# install library if not present
+#
+# External dependencies (installing/fetching if necessary)
+#
 try:
     from umqtt.robust import MQTTClient
 except ImportError:
@@ -22,7 +23,15 @@ except ImportError:
     mip.install("umqtt.simple")
     mip.install("umqtt.robust")
     from umqtt.robust import MQTTClient
+
+try:
+    from primitives import Queue
+except ImportError:
+    print("Installing missing dependencies")
+    import mip
     mip.install("github:peterhinch/micropython-async/v3/primitives")
+    from primitives import Queue
+
 
 # Application info
 __APPLICATION_NAME__ = "micropython-agent"
@@ -97,8 +106,6 @@ class Machine:
             context.reason = "Unknown failure"
         return None
 
-    # def done(self, context: Context):
-    #     return None
 
 class Restart(Machine):
     is_resuming = True
@@ -225,71 +232,75 @@ def publish_telemetry(client, period=10):
 # Agent
 #
 async def agent(queue, client):
-    print(f"Connecting to thin-edge.io broker: broker={client.server}:{client.port}, client_id={client.client_id}")
-    client.connect()
+    try:
+        print(f"Connecting to thin-edge.io broker: broker={client.server}:{client.port}, client_id={client.client_id}")
+        client.connect()
 
-    # wait for the broker to consider us dead
-    await sleep(2)
-    client.check_msg()
+        # wait for the broker to consider us dead
+        await sleep(2)
+        client.check_msg()
 
-    def _queue_message(topic, message):
-        if len(message):
+        def _queue_message(topic, message):
+            if len(message):
+                try:
+                    command = json.loads(message.decode("utf-8"))
+                    if not isinstance(command, dict):
+                        raise ValueError("payload is not a dictionary")
+                    command_type = topic.decode("utf-8").split("/")[-2]
+                    print(f"Add message to queue: {topic} {message}")
+
+                    # TODO: Keep track of which operations are already known to be in progress
+                    # or if it is resuming after a restart.
+                    command_status = command.get("status", "")
+                    # if command_status in ["successful", "failed"]:
+                    if command_status not in ["init"]:
+                        raise ValueError(f"command is already in final state. {command_status}")
+
+                    queue.put_nowait((topic, command_type, command))
+                except Exception as ex:
+                    print(f"Ignoring message. topic={topic}, message={message}, error={ex}")
+
+        client.set_callback(_queue_message)
+        print("Connected to thin-edge.io broker")
+
+        # register device
+        client.publish(f"{topic_identifier}", json.dumps({
+            "@type": "child-device",
+            "name": device_id,
+            "type": "micropython",
+        }), qos=1, retain=True)
+
+        # publish hardware info
+        client.publish(f"{topic_identifier}/twin/c8y_Hardware", json.dumps({
+            "serialNumber": serial_no,
+            "model": "Raspberry Pi Pico W",
+            "revision": "RP2040",
+        }), qos=1, retain=True)
+
+        # register support for commands
+        client.publish(f"{topic_identifier}/cmd/restart", b"{}", retain=True, qos=1)
+        client.publish(f"{topic_identifier}/cmd/software_update", b"{}", retain=True, qos=1)
+        client.publish(f"{topic_identifier}/cmd/software_list", b"{}", retain=True, qos=1)
+
+        # startup messages
+        client.publish(f"{topic_identifier}/e/boot", json.dumps({"text": f"Application started. version={__APPLICATION_VERSION__}"}), qos=1)
+
+        # subscribe to commands
+        client.subscribe(f"{topic_identifier}/cmd/+/+")
+        print("Subscribed to commands topic")
+
+        # give visual queue that the device booted up
+        await blink_led_async()
+
+        while True:
             try:
-                command = json.loads(message.decode("utf-8"))
-                if not isinstance(command, dict):
-                    raise ValueError("payload is not a dictionary")
-                command_type = topic.decode("utf-8").split("/")[-2]
-                print(f"Add message to queue: {topic} {message}")
-
-                # TODO: Keep track of which operations are already known to be in progress
-                # or if it is resuming after a restart.
-                command_status = command.get("status", "")
-                # if command_status in ["successful", "failed"]:
-                if command_status not in ["init"]:
-                    raise ValueError(f"command is already in final state. {command_status}")
-
-                queue.put_nowait((topic, command_type, command))
+                await asyncio.sleep(2)
+                client.wait_msg()   # blocking
             except Exception as ex:
-                print(f"Ignoring message. topic={topic}, message={message}, error={ex}")
-
-    client.set_callback(_queue_message)
-    print("Connected to thin-edge.io broker")
-
-    # register device
-    client.publish(f"{topic_identifier}", json.dumps({
-        "@type": "child-device",
-        "name": device_id,
-        "type": "micropython",
-    }), qos=1, retain=True)
-
-    # publish hardware info
-    client.publish(f"{topic_identifier}/twin/c8y_Hardware", json.dumps({
-        "serialNumber": serial_no,
-        "model": "Raspberry Pi Pico W",
-        "revision": "RP2040",
-    }), qos=1, retain=True)
-
-    # register support for commands
-    client.publish(f"{topic_identifier}/cmd/restart", b"{}", retain=True, qos=1)
-    client.publish(f"{topic_identifier}/cmd/software_update", b"{}", retain=True, qos=1)
-    client.publish(f"{topic_identifier}/cmd/software_list", b"{}", retain=True, qos=1)
-
-    # startup messages
-    client.publish(f"{topic_identifier}/e/boot", json.dumps({"text": f"Application started. version={__APPLICATION_VERSION__}"}), qos=1)
-
-    # subscribe to commands
-    client.subscribe(f"{topic_identifier}/cmd/+/+")
-    print("Subscribed to commands topic")
-
-    # give visual queue that the device booted up
-    await blink_led_async()
-
-    while True:
-        try:
-            await asyncio.sleep(2)
-            client.wait_msg()   # blocking
-        except Exception as ex:
-            print(f"Unexpected error: {ex}")
+                print(f"Unexpected error: {ex}")
+    except Exception as ex:
+        print(f"Failed to connect, retrying in 5 seconds. error={ex}")
+        await sleep(5)
 
 #
 # Main
