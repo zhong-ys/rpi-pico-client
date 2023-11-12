@@ -16,6 +16,7 @@ import config
 # External dependencies (installing/fetching if necessary)
 #
 try:
+    # from umqtt.simple import MQTTClient
     from umqtt.robust import MQTTClient
 except ImportError:
     print("Installing missing dependencies")
@@ -149,7 +150,7 @@ class Unsupported(Machine):
     def init(self, context: Context):
         return self.failed
 
-async def run(client, context: Context, state_machine: Machine):
+async def run(outgoing_queue, context: Context, state_machine: Machine):
     try:
         print(f"Starting state machine: {type(state_machine).__name__}, context={context.message}")
         state = getattr(state_machine, context.message.get("status", "init"), None)
@@ -162,13 +163,16 @@ async def run(client, context: Context, state_machine: Machine):
                     context.message["status"] = state.__name__
                     print(f"Save next state: {state.__name__}")
 
-                    client.publish(context.topic, json.dumps(context.message), retain=True, qos=1)
-                    await sleep(1)
+                    await outgoing_queue.put((context.topic, json.dumps(context.message), True, 1))
+                    print("Queued outgoing message")
+                    # await sleep(1)
 
                     if context.restart_requested:
+                        print("Restart requested. Stopping state machine execution")
+                        return True
                         # TODO: does this message work to see if the message has been saved or not?
                         for _ in range(0, 5):
-                            client.wait_msg()
+                            # client.wait_msg()
                             await sleep(0.5)
                         print("Restarting")
                         machine.reset()
@@ -198,7 +202,7 @@ def get_machine(context: Context) -> Machine:
         return Restart()
     return Unsupported()
 
-async def command_executor(queue, client):
+async def command_executor(queue, client, outgoing_queue):
     count = 1
     print("Starting command executor")
     while True:
@@ -208,7 +212,8 @@ async def command_executor(queue, client):
         context = Context(topic, command_type, command)
         state_machine = get_machine(context)
         if state_machine:
-            await run(client, context, state_machine)
+            await run(outgoing_queue, context, state_machine)
+            # await run(client, context, state_machine)
 
         print(f"[id={count}, type={command_type}] Finished command")
         count += 1
@@ -216,38 +221,33 @@ async def command_executor(queue, client):
 #
 # Telemetry
 #
-def publish_telemetry(client, period=10):
+def publish_telemetry(outgoing_queue, period=10):
     message = {
         "temp": read_temperature(),
     }
-    print(f"Publishing telemetry data. {message}")
+    print(f"Queuing telemetry data. {message}")
     blink_led(2, 0.15)
     try:
-        client.publish(f"{topic_identifier}/m/environment", json.dumps(message), qos=0)
-        client.check_msg()
+        outgoing_queue.put_nowait((
+            f"{topic_identifier}/m/environment",
+            json.dumps(message),
+            False,
+            0,
+        ))
     except Exception as ex:
         pass
 
 #
 # Agent
 #
-async def agent(queue, client):
+async def agent(queue, client, outgoing_queue):
     try:
-        print(f"Connecting to thin-edge.io broker: broker={client.server}:{client.port}, client_id={client.client_id}")
-        client.connect()
-
-        # wait for the broker to consider us dead
-        await sleep(2)
-        client.check_msg()
-
         def _queue_message(topic, message):
             if len(message):
                 try:
                     command = json.loads(message.decode("utf-8"))
                     if not isinstance(command, dict):
                         raise ValueError("payload is not a dictionary")
-                    command_type = topic.decode("utf-8").split("/")[-2]
-                    print(f"Add message to queue: {topic} {message}")
 
                     # TODO: Keep track of which operations are already known to be in progress
                     # or if it is resuming after a restart.
@@ -256,11 +256,28 @@ async def agent(queue, client):
                     if command_status not in ["init"]:
                         raise ValueError(f"command is already in final state. {command_status}")
 
+                    command_type = topic.decode("utf-8").split("/")[-2]
+                    print(f"Add message to queue: {topic} {message}")
                     queue.put_nowait((topic, command_type, command))
                 except Exception as ex:
-                    print(f"Ignoring message. topic={topic}, message={message}, error={ex}")
+                    pass
+                    # print(f"Ignoring message. topic={topic}, message={message}, error={ex}")
 
         client.set_callback(_queue_message)
+        connected = False
+        while not connected:
+            try:
+                print(f"Connecting to thin-edge.io broker: broker={client.server}:{client.port}, client_id={client.client_id}")
+                client.connect()
+                connected = True
+            except Exception as ex:
+                print("Connection failed retrying later")
+                await sleep(5)
+        
+
+        # wait for the broker to consider us dead
+        await sleep(2)
+        client.check_msg()
         print("Connected to thin-edge.io broker")
 
         # register device
@@ -269,6 +286,7 @@ async def agent(queue, client):
             "name": device_id,
             "type": "micropython",
         }), qos=1, retain=True)
+        # client.wait_msg()
 
         # publish hardware info
         client.publish(f"{topic_identifier}/twin/c8y_Hardware", json.dumps({
@@ -294,20 +312,41 @@ async def agent(queue, client):
 
         while True:
             try:
-                await asyncio.sleep(2)
-                client.wait_msg()   # blocking
+                print("Waiting for msg")
+                # client.wait_msg()   # blocking
+                client.check_msg()   # non-blocking
+                await asyncio.sleep(1)
             except Exception as ex:
                 print(f"Unexpected error: {ex}")
     except Exception as ex:
         print(f"Failed to connect, retrying in 5 seconds. error={ex}")
-        await sleep(5)
+        raise
+
+
+async def publisher(queue, client):
+    print("Starting publisher")
+    while True:
+        topic, payload, retain, qos = await queue.get()  # Blocks until data is ready
+        print(f"Publishing message: topic={topic}, payload={payload}, retain={retain}, qos={qos}")
+        client.publish(topic, payload, retain=retain, qos=qos)
+        # client.wait_msg()
+
+async def mqtt_driver(client):
+    while True:
+        try:
+            client.wait_msg()   # blocking
+            await sleep(0.1)
+        except Exception as ex:
+            pass
 
 #
 # Main
 #
 async def main():
     try:
-        queue = Queue(10)
+        timer = Timer()
+        queue = Queue(30)
+        outgoing_queue = Queue(30)
         print(f"Starting: device_id={device_id}, topic={topic_identifier}")
         await connect_wifi()
         led.on()
@@ -328,18 +367,21 @@ async def main():
         mqtt.lw_qos = 1
         mqtt.lw_retain = False
 
-        agent_task = asyncio.create_task(agent(queue, mqtt))
-        command_task = asyncio.create_task(command_executor(queue, mqtt))
+        agent_task = asyncio.create_task(agent(queue, mqtt, outgoing_queue))
+        command_task = asyncio.create_task(command_executor(queue, mqtt, outgoing_queue))
+        publisher_task = asyncio.create_task(publisher(outgoing_queue, mqtt))
 
-        await asyncio.sleep(0)
+        await asyncio.sleep(5)
+        # driver_task = asyncio.create_task(mqtt_driver(mqtt))
 
         # NOTE: use Timer over async tasks due to a blocking issue when publishing MQTT messages
         # This could be solved in the future if necessary
-        timer = Timer()
-        timer.init(period=10000, mode=Timer.PERIODIC, callback=lambda t: publish_telemetry(mqtt))
+        timer.init(period=10000, mode=Timer.PERIODIC, callback=lambda t: publish_telemetry(outgoing_queue))
 
         await agent_task
         await command_task
+        await publisher_task
+        # await driver_task
     except KeyboardInterrupt:
         print("Shutting down...")
     finally:
