@@ -132,6 +132,7 @@ class Restart(Machine):
 
 def download_file(url, out_file):
     # TODO: Create a new TEDGE_C8Y_CLIENT_HOST
+    # TODO: Remove once https://github.com/thin-edge/thin-edge.io/issues/2445 is resolved
     url = url.replace("127.0.0.1", config.TEDGE_BROKER_HOST)
     url = url.replace("0.0.0.0", config.TEDGE_BROKER_HOST)
     print(f"Downloading file. url={url}")
@@ -342,23 +343,6 @@ async def agent(queue, client, outgoing_queue):
                     pass
                     # print(f"Ignoring message. topic={topic}, message={message}, error={ex}")
 
-        client.set_callback(_queue_message)
-        connected = False
-        while not connected:
-            try:
-                print(
-                    f"Connecting to thin-edge.io broker: broker={client.server}:{client.port}, client_id={client.client_id}"
-                )
-                client.connect()
-                connected = True
-            except Exception as ex:
-                print("Connection failed retrying later")
-                await sleep(5)
-
-        # wait for the broker to consider us dead
-        await sleep(2)
-        client.check_msg()
-        print("Connected to thin-edge.io broker")
 
         # register device
         client.publish(
@@ -467,6 +451,49 @@ async def main():
         mqtt.lw_qos = 1
         mqtt.lw_retain = False
 
+        def _queue_message(topic, message):
+            if len(message):
+                try:
+                    command = json.loads(message.decode("utf-8"))
+                    if not isinstance(command, dict):
+                        raise ValueError("payload is not a dictionary")
+
+                    # TODO: Keep track of which operations are already known to be in progress
+                    # or if it is resuming after a restart.
+                    command_status = command.get("status", "")
+                    # if command_status in ["successful", "failed"]:
+                    if command_status not in ["init", "restarting"]:
+                        raise ValueError(
+                            f"command is already in final state. {command_status}"
+                        )
+
+                    command_type = topic.decode("utf-8").split("/")[-2]
+                    print(f"Add message to queue: {topic} {message}")
+                    queue.put_nowait((topic, command_type, command))
+                except Exception as ex:
+                    pass
+                    # print(f"Ignoring message. topic={topic}, message={message}, error={ex}")
+
+        # Block until the agent is connected for the first time?
+        # Note: does this make sense?
+        mqtt.set_callback(_queue_message)
+        connected = False
+        while not connected:
+            try:
+                print(
+                    f"Connecting to thin-edge.io broker: broker={mqtt.server}:{mqtt.port}, client_id={mqtt.client_id}"
+                )
+                mqtt.connect()
+                connected = True
+                await sleep(1)
+                mqtt.check_msg()
+                # mqtt.wait_msg()   # blocking
+                print("Connected to thin-edge.io broker")
+            except Exception as ex:
+                print("Connection failed retrying later")
+                await sleep(5)
+
+        print("Starting background tasks")
         agent_task = asyncio.create_task(agent(queue, mqtt, outgoing_queue))
         command_task = asyncio.create_task(
             command_executor(queue, mqtt, outgoing_queue)
