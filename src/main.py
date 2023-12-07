@@ -44,7 +44,7 @@ __APPLICATION_VERSION__ = "0.0.1"
 
 # Device info
 serial_no = ubinascii.hexlify(machine.unique_id()).decode()
-device_id = f"rpi-pico-{serial_no}"
+device_id = f"rpipico-{serial_no}"
 topic_identifier = f"te/device/{device_id}//"
 
 # Device in/out
@@ -132,9 +132,8 @@ class Restart(Machine):
 
 def download_file(url, out_file):
     # TODO: Create a new TEDGE_C8Y_CLIENT_HOST
-    # TODO: Remove once https://github.com/thin-edge/thin-edge.io/issues/2445 is resolved
-    url = url.replace("127.0.0.1", config.TEDGE_BROKER_HOST)
-    url = url.replace("0.0.0.0", config.TEDGE_BROKER_HOST)
+    #url = url.replace("127.0.0.1", config.TEDGE_BROKER_HOST)
+    #url = url.replace("0.0.0.0", config.TEDGE_BROKER_HOST)
     print(f"Downloading file. url={url}")
     response = requests.get(url)
     response_status_code = response.status_code
@@ -399,7 +398,7 @@ async def agent(queue, client, outgoing_queue):
 
         while True:
             try:
-                print("Waiting for msg")
+                #print("Waiting for msg")
                 # client.wait_msg()   # blocking
                 client.check_msg()  # non-blocking
                 await asyncio.sleep(1)
