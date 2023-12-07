@@ -44,8 +44,8 @@ Since the Raspberry Pi Pico needs to communicate with thin-edge.io over the netw
 
 2. Copy across the following files
 
-    * src/main.py => main.py
-    * src/config.py => config.py
+    * `src/main.py` => `/main.py`
+    * `src/config.py` => `/config.py`
 
 3. Edit the `config.py` and update WIFI and broker settings
 
