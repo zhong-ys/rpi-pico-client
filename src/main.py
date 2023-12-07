@@ -131,9 +131,6 @@ class Restart(Machine):
 
 
 def download_file(url, out_file):
-    # TODO: Create a new TEDGE_C8Y_CLIENT_HOST
-    #url = url.replace("127.0.0.1", config.TEDGE_BROKER_HOST)
-    #url = url.replace("0.0.0.0", config.TEDGE_BROKER_HOST)
     print(f"Downloading file. url={url}")
     response = requests.get(url)
     response_status_code = response.status_code
@@ -173,7 +170,6 @@ class SoftwareUpdate(Machine):
                     print("Replacing main")
                     APPLICATION_FILE = "main.py"
                     os.rename(out_file, APPLICATION_FILE)
-                    # TODO: Change the file out
                     context.restart_requested = True
                     return self.restarting
 
