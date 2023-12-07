@@ -40,7 +40,7 @@ except ImportError:
 
 # Application info
 __APPLICATION_NAME__ = "micropython-agent"
-__APPLICATION_VERSION__ = "0.0.1"
+__APPLICATION_VERSION__ = "0.0.2"
 
 # Device info
 serial_no = ubinascii.hexlify(machine.unique_id()).decode()
