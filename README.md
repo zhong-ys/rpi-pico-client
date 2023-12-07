@@ -30,7 +30,7 @@ Since the Raspberry Pi Pico needs to communicate with thin-edge.io over the netw
     tedge config set http.client.host $HOST.local
     ```
 
-    If your `$HOST`` variable is not set, then replace it with the actual name of the host your are running on (e.g. the address must be reachable from outside of the device)
+    If your `$HOST` variable is not set, then replace it with the actual name of the host your are running on (e.g. the address must be reachable from outside of the device)
 
 2. Restart the services
 
