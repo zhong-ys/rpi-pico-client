@@ -1,8 +1,15 @@
 ## Getting started
 
-Install dependencies by running the following on the device's python console
+Install dependencies by running the following on the device's python console:
 
 ```python
+# Setup network first
+import network
+wlan = network.WLAN(network.STA_IF)
+wlan.active(True)
+wlan.connect("yourssid", "password")
+
+# Then install the required packages
 import mip
 mip.install("umqtt.simple")
 mip.install("umqtt.robust")
